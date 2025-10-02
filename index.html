@@ -53,7 +53,6 @@
       border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;
       padding:10px 14px;min-height:44px;display:inline-flex;align-items:center;gap:8px;font-size:16px
     }
-    .select{border:1px solid var(--border);border-radius:12px;padding:10px 12px;font-size:16px;min-height:44px}
 
     /* Floating Bottom Panel (mobil) */
     .bottom{
@@ -62,7 +61,7 @@
       border-top:1px solid var(--border);padding:10px 12px calc(10px + var(--safe)) 12px;
     }
     .bottom-inner{
-      max-width:1000px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;
+      max-width:1000px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:8px; /* 2 Spalten: Standort + Laden */
     }
     @media (min-width: 900px){
       .bottom{display:none} /* Bottom-Leiste nur mobil/tablet */
@@ -89,13 +88,8 @@
         <div style="font-weight:600">Behindertenparkplätze – Deutschland</div>
         <div class="muted" style="font-size:12px">Quelle: OpenStreetMap / Overpass (live, ausschnittsbezogen)</div>
       </div>
-      <div class="row" style="display:none;gap:8px" id="desktop-controls">
-        <!-- Desktop-Steuerung (mobil: unten in der Bottom-Bar) -->
-        <select id="filter-desktop" class="select">
-          <option value="">Alle</option>
-          <option value="single">Einzel-Stellplätze</option>
-          <option value="capacity">Parkplätze mit ♿-Kapazität</option>
-        </select>
+      <!-- Kein Filter -->
+      <div class="row" id="desktop-controls" style="display:none;gap:8px">
         <button id="btn-reset" class="btn">Reset</button>
       </div>
     </div>
@@ -130,11 +124,6 @@
     <div class="bottom-inner">
       <button class="btn" id="btn-locate">📍 Mein Standort</button>
       <button class="btn" id="btn-load">Jetzt laden</button>
-      <select id="filter" class="select">
-        <option value="">Alle</option>
-        <option value="single">Einzel-Stellplätze</option>
-        <option value="capacity">Parkplätze mit ♿-Kapazität</option>
-      </select>
     </div>
   </div>
 
@@ -156,7 +145,7 @@
     ];
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // Eigener roter Stecknadel-Icon (SVG als Data-URL)
+    // Rote Stecknadel (SVG)
     function createRedPinIcon(){
       const svg = `
         <svg xmlns="http://www.w3.org/2000/svg" width="24" height="36" viewBox="0 0 24 36">
@@ -164,36 +153,30 @@
           <circle cx="12" cy="10" r="4" fill="#fff"/>
         </svg>`;
       const url = "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
-      return L.icon({
-        iconUrl: url,
-        iconSize: [24, 36],
-        iconAnchor: [12, 34], // Spitze unten
-        popupAnchor: [0, -30]
-      });
+      return L.icon({ iconUrl: url, iconSize: [24, 36], iconAnchor: [12, 34], popupAnchor: [0, -30] });
     }
 
     const state = {
       map: null,
       layer: null,
-      zoomGate: 10,    // Daten werden erst ab Zoom >= 10 geladen (schutz vor Rate-Limits)
-      filterKind: "",
-      locationMinZoom: 7, // << Mindest-Zoom beim Standort-Button
-      locMarker: null      // << aktuelle Stecknadel
+      zoomGate: 10,        // ♿-Daten erst ab Zoom >= 10 (schont Overpass)
+      locationMinZoom: 7,  // Mindest-Zoom beim Standort-Button
+      locMarker: null,     // Stecknadel
+      locCircle: null      // Genauigkeits-Kreis
     };
 
-    // Desktop: Controls einblenden
+    // Desktop: Reset sichtbar machen
     if (window.matchMedia("(min-width: 900px)").matches) {
       document.getElementById("desktop-controls").style.display = "flex";
     }
 
     function buildOverpassQuery(bbox){
+      // Nur Rollstuhl-relevante Objekte:
       return `
         [out:json][timeout:30];
         (
           nwr["parking_space"="disabled"](${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]});
-          nwr["amenity"="parking_space"]["parking_space"="disabled"](${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]});
           nwr["amenity"="parking"]["capacity:disabled"](${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]});
-          nwr["amenity"="parking"]["disabled_parking"~"yes|designated"](${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]});
         );
         out tags center;`;
     }
@@ -218,7 +201,9 @@
           const features = (json.elements || []).map((el) => {
             const coords = el.type === "node" ? [el.lon, el.lat] : [el.center?.lon, el.center?.lat];
             if (!coords[0] || !coords[1]) return null;
-            const isSingle = el.tags?.parking_space === "disabled" || el.tags?.amenity === "parking_space";
+            const isSingle = el.tags?.parking_space === "disabled";
+            const isCapacity = el.tags?.amenity === "parking" && !!el.tags?.["capacity:disabled"];
+            if (!isSingle && !isCapacity) return null;
             return {
               id: `${el.type}/${el.id}`,
               kind: isSingle ? "single" : "capacity",
@@ -276,9 +261,8 @@
         const b = state.map.getBounds();
         const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
         const pois = await fetchOverpass(bbox);
-        const filtered = state.filterKind ? pois.filter(p=>p.kind===state.filterKind) : pois;
-        drawMarkers(filtered);
-        cnt.textContent = String(filtered.length);
+        drawMarkers(pois);
+        cnt.textContent = String(pois.length);
         st.textContent = "bereit";
       }catch(e){
         err.textContent = "Fehler: " + (e.message || e);
@@ -308,50 +292,44 @@
         map.fire("moveend");
       });
 
-      // 📍 Standort: mindestens Zoom 7 und rote Stecknadel setzen
+      // 📍 Standort: mindestens Zoom 7 + rote Stecknadel + blauer Genauigkeits-Kreis
       document.getElementById("btn-locate").addEventListener("click", () => {
         if (!navigator.geolocation) {
           alert("Geolocation wird nicht unterstützt.");
           return;
         }
         navigator.geolocation.getCurrentPosition((pos) => {
-          const { latitude, longitude } = pos.coords;
+          const { latitude, longitude, accuracy } = pos.coords;
 
-          // 1) Rote Stecknadel aktualisieren/setzen
-          if (state.locMarker) {
-            state.map.removeLayer(state.locMarker);
-            state.locMarker = null;
-          }
+          // Stecknadel aktualisieren/setzen
+          if (state.locMarker) { state.map.removeLayer(state.locMarker); state.locMarker = null; }
           state.locMarker = L.marker([latitude, longitude], { icon: createRedPinIcon() })
             .addTo(state.map)
             .bindPopup("Mein Standort")
             .openPopup();
 
-          // 2) Auf mindestens Zoom 7 reinzoomen (falls schon näher, beibehalten)
+          // Genauigkeits-Kreis aktualisieren/setzen (blau, halbtransparent)
+          if (state.locCircle) { state.map.removeLayer(state.locCircle); state.locCircle = null; }
+          state.locCircle = L.circle([latitude, longitude], {
+            radius: accuracy || 50,       // Meter
+            color: "#3B82F6",             // Rand blau
+            weight: 2,
+            fillColor: "#3B82F6",
+            fillOpacity: 0.15
+          }).addTo(state.map);
+
+          // Auf mindestens Zoom 7 reinzoomen (falls schon näher, beibehalten)
           const targetZoom = Math.max(state.map.getZoom(), state.locationMinZoom);
           state.map.setView([latitude, longitude], targetZoom, { animate: true });
 
-          // 3) Daten nachladen
+          // Daten nachladen
           state.map.fire("moveend");
         }, () => {
           alert("Standort abgelehnt oder nicht verfügbar.");
         }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
       });
 
-      document.getElementById("filter").addEventListener("change", (e) => {
-        state.filterKind = e.target.value || "";
-        requestData();
-      });
-
-      // Desktop-Filter synchronisieren (falls sichtbar)
-      const desktopFilter = document.getElementById("filter-desktop");
-      if (desktopFilter) {
-        desktopFilter.addEventListener("change", (e)=>{
-          state.filterKind = e.target.value || "";
-          document.getElementById("filter").value = state.filterKind;
-          requestData();
-        });
-      }
+      // Desktop Reset
       document.getElementById("btn-reset").addEventListener("click", () => {
         state.map.setView([51.1657, 10.4515], 6);
       });
