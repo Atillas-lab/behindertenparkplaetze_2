@@ -160,7 +160,8 @@
       map: null,
       layer: null,
       zoomGate: 10,   // mobil etwas höher: weniger Rate-Limit-Probleme
-      filterKind: ""
+      filterKind: "",
+      locationZoom: 16  // << NEU: Ziel-Zoom beim Standort-Button (Straßen-Level)
     };
 
     // Desktop: Controls einblenden
@@ -289,14 +290,22 @@
         map.setZoom(Math.max(map.getZoom(), state.zoomGate));
         map.fire("moveend");
       });
+
+      // 📍 Standort -> direkt auf Straßen-Level zoomen
       document.getElementById("btn-locate").addEventListener("click", () => {
-        if (!navigator.geolocation) return alert("Geolocation wird nicht unterstützt.");
-        navigator.geolocation.getCurrentPosition((pos)=>{
+        if (!navigator.geolocation) {
+          alert("Geolocation wird nicht unterstützt.");
+          return;
+        }
+        navigator.geolocation.getCurrentPosition((pos) => {
           const { latitude, longitude } = pos.coords;
-          map.setView([latitude, longitude], Math.max(map.getZoom(), state.zoomGate));
-          map.fire("moveend");
-        }, (err)=> alert("Standort abgelehnt oder nicht verfügbar."));
+          state.map.setView([latitude, longitude], state.locationZoom, { animate: true });
+          state.map.fire("moveend");
+        }, () => {
+          alert("Standort abgelehnt oder nicht verfügbar.");
+        }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
       });
+
       document.getElementById("filter").addEventListener("change", (e) => {
         state.filterKind = e.target.value || "";
         requestData();
@@ -312,7 +321,7 @@
         });
       }
       document.getElementById("btn-reset").addEventListener("click", () => {
-        map.setView([51.1657, 10.4515], 6);
+        state.map.setView([51.1657, 10.4515], 6);
       });
 
       document.getElementById("zoomGateText").textContent = String(state.zoomGate);
